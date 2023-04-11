@@ -22,7 +22,7 @@
 #define SERVO_MAX_DEGREE            180         //Maximum angle in degree upto which servo can rotate
 #define SERVO_MID_ANGLE             90          //Mid angle for servo
 
-#define TAG "MY_GIMBAL";
+#define TAG "MY_GIMBAL"
 
 static float acc_x_offset = 0, acc_y_offset = 0, acc_z_offset = 0;
 static float gyro_x_offset = 0, gyro_y_offset = 0, gyro_z_offset = 0;
@@ -131,6 +131,11 @@ int constrain(int value, int min, int max) {
     }
 }
 
+double map(double x, double in_min, double in_max, double out_min, double out_max) {
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+
 void sg90_task(void *pvParameters) {
     while (1) {
         if (fabs(angle_x - angle_x_prev) > 1) { // Check if angle has changed more than 1 degree
@@ -139,7 +144,7 @@ void sg90_task(void *pvParameters) {
             int duty_us = SERVO_MIN_PULSEWIDTH + (servo_angle * (SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) / SERVO_MAX_DEGREE);
             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty_us);
             angle_x_prev = angle_x;
-            vTaskDelay(10 / portTICK_PERIOD_MS);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
         }
     }
 }

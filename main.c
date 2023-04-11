@@ -22,16 +22,12 @@
 #define SERVO_MAX_DEGREE            180         //Maximum angle in degree upto which servo can rotate
 #define SERVO_MID_ANGLE             90          //Mid angle for servo
 
-#define GYRO_RANGE_DPS             0.0075      //Gyro range in dps
-
 #define TAG "MY_GIMBAL"
 
 static float acc_x_offset = 0, acc_y_offset = 0, acc_z_offset = 0;
 static float gyro_x_offset = 0, gyro_y_offset = 0, gyro_z_offset = 0;
 static float angle_x = 0, angle_y = 0;
 static float angle_x_prev = 0;
-
-float angle = 0.0f;
 
 typedef struct {
     int16_t x;
@@ -140,6 +136,19 @@ double map(double x, double in_min, double in_max, double out_min, double out_ma
 }
 
 
+void sg90_task(void *pvParameters) {
+    while (1) {
+        if (fabs(angle_x - angle_x_prev) > 1) { // Check if angle has changed more than 1 degree
+            int servo_angle = SERVO_MID_ANGLE - (angle_x / 2); // Calculate servo angle
+            servo_angle = constrain(servo_angle, 0, SERVO_MAX_DEGREE); // Constrain servo angle between 0 and 180 degrees
+            int duty_us = SERVO_MIN_PULSEWIDTH + (servo_angle * (SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) / SERVO_MAX_DEGREE);
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty_us);
+            angle_x_prev = angle_x;
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+    }
+}
+
 
 esp_err_t mpu6050_read_acc_data(mpu6050_acc_data_t* acc_data)
 {
@@ -212,41 +221,8 @@ void mpu6050_task(void* pvParameters) {
         // Calculate angle from accelerometer data
         angle_x = atan2(acc_data.y, acc_data.z) * 180.0 / M_PI;
         angle_y = atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI;
-
-        gyro_data.x -= gyro_x_offset;
-        gyro_data.y -= gyro_y_offset;
-        gyro_data.z -= gyro_z_offset;
-
-        float gyro_sensitivity = 1.0 / (float)(32767 / GYRO_RANGE_DPS);
-        // Convert gyro readings to degrees per second
-        gyro_data.x = gyro_data.x * gyro_sensitivity;
-        gyro_data.y = gyro_data.y * gyro_sensitivity;
-        gyro_data.z = gyro_data.z * gyro_sensitivity;
-
-        // Integrate angular velocity to get change in angle
-        float dt = 0.1f; // Sample time in seconds
-        angle += gyro_data.z * dt;
-
-        // Convert angle to degrees
-        angle *= 180.0f / M_PI;
-
-        // Print the angle of turn in degrees
-        printf("Angle of turn: %.2f degrees\n", angle);
         printf("Angle x: %f, Angle y: %f\n", angle_x, angle_y);
         vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-}
-
-void sg90_task(void *pvParameters) {
-    while (1) {
-        if (fabs(angle_x - angle_x_prev) > 1) { // Check if angle has changed more than 1 degree
-            int servo_angle = SERVO_MID_ANGLE - (angle_x / 2); // Calculate servo angle
-            servo_angle = constrain(servo_angle, 0, SERVO_MAX_DEGREE); // Constrain servo angle between 0 and 180 degrees
-            int duty_us = SERVO_MIN_PULSEWIDTH + (servo_angle * (SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) / SERVO_MAX_DEGREE);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty_us);
-            angle_x_prev = angle_x;
-            vTaskDelay(100 / portTICK_PERIOD_MS);
-        }
     }
 }
 

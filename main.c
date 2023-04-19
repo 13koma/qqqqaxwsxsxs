@@ -5,6 +5,8 @@
 #include "soc/mcpwm_periph.h"
 #include "soc/mcpwm_reg.h"
 #include "soc/mcpwm_struct.h"
+#include "MadgwickAHRS.h"
+
 
 #define I2C_MASTER_SCL_IO           22          /*!< GPIO number for I2C master clock */
 #define I2C_MASTER_SDA_IO           21          /*!< GPIO number for I2C master data  */
@@ -15,12 +17,17 @@
 #define I2C_CLK_FLAG                0           /*!< I2C master clock flag */
 #define MPU6050_ADDR                0x68        /*!< MPU6050 device address */
 
-#define SERVO_GPIO                  4
+// #define SERVO_GPIO                  4
 #define SERVO_FREQ                  50
-#define SERVO_MIN_PULSEWIDTH        500         //Minimum pulse width in microsecond
-#define SERVO_MAX_PULSEWIDTH        2500        //Maximum pulse width in microsecond
+// #define SERVO_MIN_PULSEWIDTH        500         //Minimum pulse width in microsecond
+// #define SERVO_MAX_PULSEWIDTH        2500        //Maximum pulse width in microsecond
 #define SERVO_MAX_DEGREE            180         //Maximum angle in degree upto which servo can rotate
 #define SERVO_MID_ANGLE             90          //Mid angle for servo
+
+#define SERVO_GPIO 18 // GPIO connected to the servo signal wire
+#define SERVO_MIN_PULSEWIDTH 450 // Minimum pulse width in microsecond
+#define SERVO_MAX_PULSEWIDTH 2300 // Maximum pulse width in microsecond
+#define SERVO_MAX_DEGREE 180 // Maximum angle in degree upto which servo can rotate
 
 #define TAG "MY_GIMBAL"
 
@@ -28,6 +35,7 @@ static float acc_x_offset = 0, acc_y_offset = 0, acc_z_offset = 0;
 static float gyro_x_offset = 0, gyro_y_offset = 0, gyro_z_offset = 0;
 static float angle_x = 0, angle_y = 0;
 static float angle_x_prev = 0;
+static float pitch = 0, roll = 0;
 
 typedef struct {
     int16_t x;
@@ -217,11 +225,17 @@ void mpu6050_task(void* pvParameters) {
         } else {
             ESP_LOGE(TAG, "Failed to read Gyro data");
         }
+        MadgwickAHRSupdateIMU(gyro_data.x, gyro_data.y, gyro_data.z, acc_data.x, acc_data.y, acc_data.z);
 
+        // yaw = atan2(2.0 * (q2 * q3 + q0 * q1), q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3);
+        pitch = asin(-2.0 * (q1 * q3 - q0 * q2));
+        roll = atan2(2.0 * (q1 * q2 + q0 * q3), q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3);
         // Calculate angle from accelerometer data
-        angle_x = atan2(acc_data.y, acc_data.z) * 180.0 / M_PI;
-        angle_y = atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI;
-        printf("Angle x: %f, Angle y: %f\n", angle_x, angle_y);
+        // angle_x = atan2(acc_data.y, acc_data.z) * 180.0 / M_PI;
+        // angle_y = atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI;
+        // printf("Angle x: %f, Angle y: %f\n", angle_x, angle_y);
+        // printf("Q0: %f, Q1: %f, Q2: %f, Q3: %f\n", q0, q1, q2, q3);
+        printf("Angle x: %f, Angle y: %f\n", roll, pitch);
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
@@ -230,10 +244,22 @@ void app_main()
 {
     i2c_master_init();
     ESP_LOGI(TAG, "I2C initialized");
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, SERVO_GPIO);
+
+    mcpwm_config_t pwm_config;
+    pwm_config.frequency = 50; //set frequency to 50Hz - standard for servos
+    pwm_config.cmpr_a = 0; //set duty cycle of PWM A to 0
+    pwm_config.cmpr_b = 0; //set duty cycle of PWM B to 0
+    pwm_config.counter_mode = MCPWM_UP_COUNTER;
+    pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);
+
+    // Set the servo to the middle position
+    mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, (SERVO_MAX_PULSEWIDTH + SERVO_MIN_PULSEWIDTH) / 2);
     mpu6050_init();
     ESP_LOGI(TAG, "MPU6050 initialized");
-    servo_init();
-    ESP_LOGI(TAG, "SG90 SERVO initialized");
+    // servo_init();
+    // ESP_LOGI(TAG, "SG90 SERVO initialized");
     xTaskCreate(mpu6050_task, "mpu6050_task", 2048, NULL, 5, NULL);
-    xTaskCreate(sg90_task, "sg90_task", 2048, NULL, 5, NULL);
+    // xTaskCreate(sg90_task, "sg90_task", 2048, NULL, 5, NULL);
 }

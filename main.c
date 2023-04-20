@@ -18,6 +18,24 @@
 #define AK8975_ADDR                 0x0C        /* AK8975 device address */
 #define CAL_SAMPLES                 1000        /* Number of loops to calibrate MPU6050 */
 
+#define MPU9150_PWR_MGMT_1          0x00
+#define AK8975_CNTL 0x0A
+#define AK8975_POWER_DOWN 0x00
+#define AK8975_SINGLE_MEASUREMENT 0x01
+#define MPU9150_INT_PIN_CFG 0x37
+#define MPU9150_USER_CTRL 0x6A
+#define MPU9150_I2C_MST_EN 0x20
+#define MPU9150_I2C_MST_CLK 0x0D
+#define MPU9150_I2C_SLV0_ADDR 0x25
+#define MPU9150_I2C_SLV0_REG 0x26
+#define MPU9150_I2C_SLV0_CTRL 0x27
+#define MPU9150_SMPLRT_DIV 0x07
+#define MPU9150_CONFIG 0x06
+#define MPU9150_GYRO_CONFIG 0x18
+#define MPU9150_ACCEL_CONFIG 0x10
+#define MPU9150_I2C_MST_CTRL 0x24
+
+
 /* Hextronik HXT900 servo settings */
 #define SERVO_FREQ                  20          /* Frequency of a servo */
 #define SERVO_MID_ANGLE             90          /* Mid angle for servo */
@@ -25,6 +43,27 @@
 #define SERVO_MAX_PULSEWIDTH        2300        /* Maximum pulse width in microsecond */
 #define SERVO_MAX_DEGREE            180         /* Maximum angle in degree upto which servo can rotate */
 #define SERVO_ROLL_GPIO             18          /* Servo controlling roll */
+
+#define MPU9150_I2C_ADDRESS     (0x68) // MPU9150 I2C address
+#define MPU9150_RA_WHO_AM_I     (0x75) // MPU9150 WHO_AM_I register address
+#define MPU9150_WHO_AM_I        (0x68) // MPU9150 WHO_AM_I register value
+#define MPU9150_RA_PWR_MGMT_1   (0x6B) // MPU9150 PWR_MGMT_1 register address
+#define MPU9150_PWR1_CLKSEL_BIT (2)    // MPU9150 PWR_MGMT_1 CLKSEL bit
+#define MPU9150_PWR1_SLEEP_BIT  (6)    // MPU9150 PWR_MGMT_1 SLEEP bit
+#define MPU9150_PWR1_DEVICE_RESET_BIT (7) // MPU9150 PWR_MGMT_1 DEVICE_RESET bit
+#define MPU9150_RA_SMPLRT_DIV   (0x19) // MPU9150 SMPLRT_DIV register address
+#define MPU9150_RA_CONFIG       (0x1A) // MPU9150 CONFIG register address
+#define MPU9150_RA_GYRO_CONFIG  (0x1B) // MPU9150 GYRO_CONFIG register address
+#define MPU9150_RA_ACCEL_CONFIG (0x1C) // MPU9150 ACCEL_CONFIG register address
+#define MPU9150_RA_INT_PIN_CFG  (0x37) // MPU9150 INT_PIN_CFG register address
+#define MPU9150_RA_ACCEL_XOUT_H (0x3B) // MPU9150 ACCEL_XOUT_H register address
+#define MPU9150_RA_PWR_MGMT_2   (0x6C) // MPU9150 PWR_MGMT_2 register address
+#define AK8975_I2C_ADDRESS      (0x0C) // AK8975 I2C address
+#define AK8975_RA_WIA           (0x00) // AK8975 WIA register address
+#define AK8975_WIA              (0x48) // AK8975 WIA register value
+#define AK8975_RA_CNTL          (0x0A) // AK8975 CNTL register address
+#define AK8975_CNTL_MODE_MEASURE  (0x01) // AK8975 CNTL mode: single measurement
+#define AK8975_RA_HXL           (0x03) // AK8975 HXL register address
 
 #define TAG "MY_GIMBAL"
 
@@ -72,16 +111,17 @@ esp_err_t mpu9150_read_mag_data(mpu9150_mag_data_t* mag_data);
 int pidOutputToDutyCycle(float pidOutput);
 
 /* I2C initialization */
-esp_err_t i2c_master_init()
+static esp_err_t i2c_master_init()
 {
-    i2c_config_t conf;
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = I2C_MASTER_SDA_IO;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_io_num = I2C_MASTER_SCL_IO;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = I2C_FREQ_HZ;
-    conf.clk_flags = I2C_CLK_FLAG;
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_FREQ_HZ,
+        .clk_flags = I2C_CLK_FLAG
+    };
     esp_err_t ret = i2c_param_config(I2C_MASTER_NUM, &conf);
     if (ret != ESP_OK) {
         return ret;
@@ -89,10 +129,13 @@ esp_err_t i2c_master_init()
     return i2c_driver_install(I2C_MASTER_NUM, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
+
+
 /* MPU9150 initialization and calibration */
 esp_err_t mpu9150_init()
 {
     uint8_t data;
+    // Wake up MPU9150
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
@@ -104,10 +147,11 @@ esp_err_t mpu9150_init()
     if (ret != ESP_OK) {
         return ret;
     }
+    // Read the contents of accelerometer config register 
     cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x1C, true);
+    i2c_master_write_byte(cmd, MPU9150_RA_ACCEL_CONFIG, true);
     i2c_master_read_byte(cmd, &data, I2C_MASTER_NACK);
     i2c_master_stop(cmd);
     ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
@@ -115,10 +159,23 @@ esp_err_t mpu9150_init()
     if (ret != ESP_OK) {
         return ret;
     }
+    // Read the contents of gyroscope config register 
     cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x37, true);
+    i2c_master_write_byte(cmd, MPU9150_RA_GYRO_CONFIG, true);
+    i2c_master_read_byte(cmd, &data, I2C_MASTER_NACK);
+    i2c_master_stop(cmd);
+    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    // Enable I2C bypass
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, MPU9150_RA_INT_PIN_CFG, true);
     i2c_master_write_byte(cmd, 0x02, true);
     i2c_master_stop(cmd);
     ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
@@ -126,6 +183,19 @@ esp_err_t mpu9150_init()
     if (ret != ESP_OK) {
         return ret;
     }
+    // Set magnetometer to single measure mode
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, 0x0A, true);
+    i2c_master_write_byte(cmd, 0x01, true);
+    i2c_master_stop(cmd);
+    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     printf("MPU6050 WHO_AM_I: 0x%02x\n", data);
     /* Calibration */
     mpu9150_acc_data_t acc_data;
@@ -238,37 +308,39 @@ esp_err_t mpu9150_read_gyro_data(mpu9150_gyro_data_t* gyro_data)
 esp_err_t mpu9150_read_mag_data(mpu9150_mag_data_t *mag_data)
 {
     // Set AK8975 magnetometer to single measurement mode
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x0A, true);
-    i2c_master_write_byte(cmd, 0x01, true);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
-    i2c_cmd_link_delete(cmd);
+    // i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    // i2c_master_start(cmd);
+    // i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_WRITE, true);
+    // i2c_master_write_byte(cmd, 0x0A, true);
+    // i2c_master_write_byte(cmd, 0x01, true);
+    // i2c_master_stop(cmd);
+    // esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    // i2c_cmd_link_delete(cmd);
 
     // Read magnetometer data from AK8975 data registers
-    uint8_t mag_data_buf[6];
-    cmd = i2c_cmd_link_create();
+    uint8_t raw_data[6];
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, 0x03, true);
     i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
     i2c_cmd_link_delete(cmd);
-
+    if (ret != ESP_OK) {
+        return ret;
+    }
     cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_READ, true);
-    i2c_master_read(cmd, mag_data_buf, 6, I2C_MASTER_LAST_NACK);
+    i2c_master_read(cmd, raw_data, 6, I2C_MASTER_LAST_NACK);
     i2c_master_stop(cmd);
     ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
     i2c_cmd_link_delete(cmd);
 
     // Convert raw data to magnetometer data structure
-    mag_data->x = (mag_data_buf[1] << 8) | mag_data_buf[0];
-    mag_data->y = (mag_data_buf[3] << 8) | mag_data_buf[2];
-    mag_data->z = (mag_data_buf[5] << 8) | mag_data_buf[4];
+    mag_data->x = (raw_data[1] << 8) | raw_data[0];
+    mag_data->y = (raw_data[3] << 8) | raw_data[2];
+    mag_data->z = (raw_data[5] << 8) | raw_data[4];
     return ESP_OK;
 }
 
@@ -277,7 +349,6 @@ float lowPassFilter(float input) {
   previousOutput = output;
   return output;
 }
-
 
 // void mpu6050_task(void* pvParameters) {
 //     mpu6050_acc_data_t acc_data;

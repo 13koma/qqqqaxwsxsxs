@@ -107,7 +107,7 @@ esp_err_t mpu9150_init()
     cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x1B, true);
+    i2c_master_write_byte(cmd, 0x1C, true);
     i2c_master_read_byte(cmd, &data, I2C_MASTER_NACK);
     i2c_master_stop(cmd);
     ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
@@ -316,6 +316,8 @@ void mpu9150_task(void* pvParameters) {
         angle_x = lowPassFilter(atan2(acc_data.y, acc_data.z) * 180.0 / M_PI);
         angle_y = lowPassFilter(atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI);
         // printf("Angle x: %f, Angle y: %f\n", angle_x, angle_y);
+        printf("ACC DATA: X=%d, Y=%d, Z=%d\n", acc_data.x, acc_data.y, acc_data.z);
+        printf("GYRO DATA: X=%d, Y=%d, Z=%d\n", gyro_data.x, gyro_data.y, gyro_data.z);
         printf("MAG DATA: X=%d, Y=%d, Z=%d\n", mag_data.x, mag_data.y, mag_data.z);
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }

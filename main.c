@@ -1,57 +1,77 @@
+#include <math.h>
 #include "driver/i2c.h"
 #include "esp_log.h"
-#include <math.h>
 #include "driver/mcpwm.h"
 #include "soc/mcpwm_periph.h"
 #include "soc/mcpwm_reg.h"
 #include "soc/mcpwm_struct.h"
-#include "MadgwickAHRS.h"
 
+/* MPU6050 settings */
+#define I2C_MASTER_SCL_IO           22          /* GPIO number for I2C master clock */
+#define I2C_MASTER_SDA_IO           21          /* GPIO number for I2C master data  */
+#define I2C_MASTER_NUM              I2C_NUM_0   /* I2C port number for master dev */
+#define I2C_MASTER_TX_BUF_DISABLE   0           /* I2C master Tx buffer disabled */
+#define I2C_MASTER_RX_BUF_DISABLE   0           /* I2C master Rx buffer disabled */
+#define I2C_FREQ_HZ                 100000      /* I2C master clock frequency */
+#define I2C_CLK_FLAG                0           /* I2C master clock flag */
+#define MPU9150_ADDR                0x68        /* MPU9150 device address */
+#define AK8975_ADDR                 0x0C        /* AK8975 device address */
+#define CAL_SAMPLES                 1000        /* Number of loops to calibrate MPU6050 */
 
-#define I2C_MASTER_SCL_IO           22          /*!< GPIO number for I2C master clock */
-#define I2C_MASTER_SDA_IO           21          /*!< GPIO number for I2C master data  */
-#define I2C_MASTER_NUM              I2C_NUM_0   /*!< I2C port number for master dev */
-#define I2C_MASTER_TX_BUF_DISABLE   0           /*!< I2C master Tx buffer disabled */
-#define I2C_MASTER_RX_BUF_DISABLE   0           /*!< I2C master Rx buffer disabled */
-#define I2C_FREQ_HZ                 100000      /*!< I2C master clock frequency */
-#define I2C_CLK_FLAG                0           /*!< I2C master clock flag */
-#define MPU6050_ADDR                0x68        /*!< MPU6050 device address */
-
-// #define SERVO_GPIO                  4
-#define SERVO_FREQ                  50
-// #define SERVO_MIN_PULSEWIDTH        500         //Minimum pulse width in microsecond
-// #define SERVO_MAX_PULSEWIDTH        2500        //Maximum pulse width in microsecond
-#define SERVO_MAX_DEGREE            180         //Maximum angle in degree upto which servo can rotate
-#define SERVO_MID_ANGLE             90          //Mid angle for servo
-
-#define SERVO_GPIO 18 // GPIO connected to the servo signal wire
-#define SERVO_MIN_PULSEWIDTH 450 // Minimum pulse width in microsecond
-#define SERVO_MAX_PULSEWIDTH 2300 // Maximum pulse width in microsecond
-#define SERVO_MAX_DEGREE 180 // Maximum angle in degree upto which servo can rotate
+/* Hextronik HXT900 servo settings */
+#define SERVO_FREQ                  20          /* Frequency of a servo */
+#define SERVO_MID_ANGLE             90          /* Mid angle for servo */
+#define SERVO_MIN_PULSEWIDTH        450         /* Minimum pulse width in microsecond */
+#define SERVO_MAX_PULSEWIDTH        2300        /* Maximum pulse width in microsecond */
+#define SERVO_MAX_DEGREE            180         /* Maximum angle in degree upto which servo can rotate */
+#define SERVO_ROLL_GPIO             18          /* Servo controlling roll */
 
 #define TAG "MY_GIMBAL"
 
+/* Variables to store offset and angle values of MPU9150 */
 static float acc_x_offset = 0, acc_y_offset = 0, acc_z_offset = 0;
 static float gyro_x_offset = 0, gyro_y_offset = 0, gyro_z_offset = 0;
 static float angle_x = 0, angle_y = 0;
 static float angle_x_prev = 0;
-static float pitch = 0, roll = 0;
+
+/* Low-pass variables */
+static const float alpha = 0.2;
+float previousOutput = 0;
+
+/* PID variables */
+const float kp = 0.1;
+const float ki = 0.1;
+const float kd = 0.01;
+float previous_error = 0;
+float integral = 0;
+float desired_angle = 0, current_angle = 0;
+int dutyCycle = 0;
+
+/* Structs to store acc and gyro variables */
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+} mpu9150_acc_data_t;
 
 typedef struct {
     int16_t x;
     int16_t y;
     int16_t z;
-} mpu6050_acc_data_t;
+} mpu9150_gyro_data_t;
 
 typedef struct {
     int16_t x;
     int16_t y;
     int16_t z;
-} mpu6050_gyro_data_t;
+} mpu9150_mag_data_t;
 
-esp_err_t mpu6050_read_acc_data(mpu6050_acc_data_t* acc_data);
-esp_err_t mpu6050_read_gyro_data(mpu6050_gyro_data_t* gyro_data);
+esp_err_t mpu9150_read_acc_data(mpu9150_acc_data_t* acc_data);
+esp_err_t mpu9150_read_gyro_data(mpu9150_gyro_data_t* gyro_data);
+esp_err_t mpu9150_read_mag_data(mpu9150_mag_data_t* mag_data);
+int pidOutputToDutyCycle(float pidOutput);
 
+/* I2C initialization */
 esp_err_t i2c_master_init()
 {
     i2c_config_t conf;
@@ -69,12 +89,13 @@ esp_err_t i2c_master_init()
     return i2c_driver_install(I2C_MASTER_NUM, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
-esp_err_t mpu6050_init()
+/* MPU9150 initialization and calibration */
+esp_err_t mpu9150_init()
 {
     uint8_t data;
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, MPU6050_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, 0x6B, true);
     i2c_master_write_byte(cmd, 0x00, true);
     i2c_master_stop(cmd);
@@ -85,7 +106,7 @@ esp_err_t mpu6050_init()
     }
     cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, MPU6050_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, 0x1B, true);
     i2c_master_read_byte(cmd, &data, I2C_MASTER_NACK);
     i2c_master_stop(cmd);
@@ -94,13 +115,26 @@ esp_err_t mpu6050_init()
     if (ret != ESP_OK) {
         return ret;
     }
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, 0x37, true);
+    i2c_master_write_byte(cmd, 0x02, true);
+    i2c_master_stop(cmd);
+    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    if (ret != ESP_OK) {
+        return ret;
+    }
     printf("MPU6050 WHO_AM_I: 0x%02x\n", data);
-    // Calibration
-    mpu6050_acc_data_t acc_data;
-    mpu6050_gyro_data_t gyro_data;
-    for (int i = 0; i < 1000; i++) {
-        mpu6050_read_acc_data(&acc_data);
-        mpu6050_read_gyro_data(&gyro_data);
+    /* Calibration */
+    mpu9150_acc_data_t acc_data;
+    mpu9150_gyro_data_t gyro_data;
+    mpu9150_mag_data_t mag_data;
+    for (int i = 0; i < CAL_SAMPLES; i++) {
+        mpu9150_read_acc_data(&acc_data);
+        mpu9150_read_gyro_data(&gyro_data);
+        mpu9150_read_mag_data(&mag_data);
         acc_x_offset += (float)acc_data.x / 16384.0;
         acc_y_offset += (float)acc_data.y / 16384.0;
         acc_z_offset += (float)acc_data.z / 16384.0;
@@ -143,30 +177,21 @@ double map(double x, double in_min, double in_max, double out_min, double out_ma
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-
-void sg90_task(void *pvParameters) {
-    while (1) {
-        if (fabs(angle_x - angle_x_prev) > 1) { // Check if angle has changed more than 1 degree
-            int servo_angle = SERVO_MID_ANGLE - (angle_x / 2); // Calculate servo angle
-            servo_angle = constrain(servo_angle, 0, SERVO_MAX_DEGREE); // Constrain servo angle between 0 and 180 degrees
-            int duty_us = SERVO_MIN_PULSEWIDTH + (servo_angle * (SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) / SERVO_MAX_DEGREE);
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty_us);
-            angle_x_prev = angle_x;
-            vTaskDelay(100 / portTICK_PERIOD_MS);
-        }
-    }
+int pidOutputToDutyCycle(float pidOutput) {
+    float angle = constrain(pidOutput, 0, 180); // Constrain the PID output to the servo's range (0-180 degrees)
+    int dutyCycle = map(angle, 0, 180, SERVO_MIN_PULSEWIDTH, SERVO_MAX_PULSEWIDTH); // Map the angle to the servo's duty cycle range
+    return dutyCycle;
 }
 
-
-esp_err_t mpu6050_read_acc_data(mpu6050_acc_data_t* acc_data)
+esp_err_t mpu9150_read_acc_data(mpu9150_acc_data_t* acc_data)
 {
     uint8_t raw_data[6];
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, MPU6050_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, 0x3B, true);
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, MPU6050_ADDR << 1 | I2C_MASTER_READ, true);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_READ, true);
     i2c_master_read(cmd, raw_data, 5, I2C_MASTER_ACK);
     i2c_master_read_byte(cmd, &raw_data[5], I2C_MASTER_NACK);
     i2c_master_stop(cmd);
@@ -184,15 +209,15 @@ esp_err_t mpu6050_read_acc_data(mpu6050_acc_data_t* acc_data)
     return ESP_OK;
 }
 
-esp_err_t mpu6050_read_gyro_data(mpu6050_gyro_data_t* gyro_data)
+esp_err_t mpu9150_read_gyro_data(mpu9150_gyro_data_t* gyro_data)
 {
     uint8_t raw_data[6];
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, MPU6050_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, 0x43, true);
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, MPU6050_ADDR << 1 | I2C_MASTER_READ, true);
+    i2c_master_write_byte(cmd, MPU9150_ADDR << 1 | I2C_MASTER_READ, true);
     i2c_master_read(cmd, raw_data, 5, I2C_MASTER_ACK);
     i2c_master_read_byte(cmd, &raw_data[5], I2C_MASTER_NACK);
     i2c_master_stop(cmd);
@@ -210,33 +235,108 @@ esp_err_t mpu6050_read_gyro_data(mpu6050_gyro_data_t* gyro_data)
     return ESP_OK;
 }
 
-void mpu6050_task(void* pvParameters) {
-    mpu6050_acc_data_t acc_data;
-    mpu6050_gyro_data_t gyro_data;
+esp_err_t mpu9150_read_mag_data(mpu9150_mag_data_t *mag_data)
+{
+    // Set AK8975 magnetometer to single measurement mode
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, 0x0A, true);
+    i2c_master_write_byte(cmd, 0x01, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+
+    // Read magnetometer data from AK8975 data registers
+    uint8_t mag_data_buf[6];
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, 0x03, true);
+    i2c_master_stop(cmd);
+    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, AK8975_ADDR << 1 | I2C_MASTER_READ, true);
+    i2c_master_read(cmd, mag_data_buf, 6, I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+
+    // Convert raw data to magnetometer data structure
+    mag_data->x = (mag_data_buf[1] << 8) | mag_data_buf[0];
+    mag_data->y = (mag_data_buf[3] << 8) | mag_data_buf[2];
+    mag_data->z = (mag_data_buf[5] << 8) | mag_data_buf[4];
+    return ESP_OK;
+}
+
+float lowPassFilter(float input) {
+  float output = alpha * input + (1 - alpha) * previousOutput;
+  previousOutput = output;
+  return output;
+}
+
+
+// void mpu6050_task(void* pvParameters) {
+//     mpu6050_acc_data_t acc_data;
+//     mpu6050_gyro_data_t gyro_data;
+
+//     while (1) {
+//         if (mpu6050_read_acc_data(&acc_data) == ESP_OK) {
+//             ESP_LOGI(TAG, "Acc data: x=%d, y=%d, z=%d", acc_data.x, acc_data.y, acc_data.z);
+//         } else {
+//             ESP_LOGE(TAG, "Failed to read Acc data");
+//         }
+//         if (mpu6050_read_gyro_data(&gyro_data) == ESP_OK) {
+//             ESP_LOGI(TAG, "Gyro data: x=%d, y=%d, z=%d", gyro_data.x, gyro_data.y, gyro_data.z);
+//         } else {
+//             ESP_LOGE(TAG, "Failed to read Gyro data");
+//         }
+
+//         // Calculate angle from accelerometer data
+//         angle_x = lowPassFilter(atan2(acc_data.y, acc_data.z) * 180.0 / M_PI);
+//         angle_y = lowPassFilter(atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI);
+//         printf("Angle x: %f, Angle y: %f\n", angle_x, angle_y);
+//         vTaskDelay(100 / portTICK_PERIOD_MS);
+//     }
+// }
+
+void mpu9150_task(void* pvParameters) {
+    mpu9150_acc_data_t acc_data;
+    mpu9150_gyro_data_t gyro_data;
+    mpu9150_mag_data_t mag_data;
 
     while (1) {
-        if (mpu6050_read_acc_data(&acc_data) == ESP_OK) {
-            ESP_LOGI(TAG, "Acc data: x=%d, y=%d, z=%d", acc_data.x, acc_data.y, acc_data.z);
-        } else {
-            ESP_LOGE(TAG, "Failed to read Acc data");
-        }
-        if (mpu6050_read_gyro_data(&gyro_data) == ESP_OK) {
-            ESP_LOGI(TAG, "Gyro data: x=%d, y=%d, z=%d", gyro_data.x, gyro_data.y, gyro_data.z);
-        } else {
-            ESP_LOGE(TAG, "Failed to read Gyro data");
-        }
-        MadgwickAHRSupdateIMU(gyro_data.x, gyro_data.y, gyro_data.z, acc_data.x, acc_data.y, acc_data.z);
-
-        // yaw = atan2(2.0 * (q2 * q3 + q0 * q1), q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3);
-        pitch = asin(-2.0 * (q1 * q3 - q0 * q2));
-        roll = atan2(2.0 * (q1 * q2 + q0 * q3), q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3);
+        mpu9150_read_acc_data(&acc_data);
+        mpu9150_read_gyro_data(&gyro_data);
+        mpu9150_read_mag_data(&mag_data);
         // Calculate angle from accelerometer data
-        // angle_x = atan2(acc_data.y, acc_data.z) * 180.0 / M_PI;
-        // angle_y = atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI;
+        angle_x = lowPassFilter(atan2(acc_data.y, acc_data.z) * 180.0 / M_PI);
+        angle_y = lowPassFilter(atan2(-acc_data.x, sqrt(acc_data.y * acc_data.y + acc_data.z * acc_data.z)) * 180.0 / M_PI);
         // printf("Angle x: %f, Angle y: %f\n", angle_x, angle_y);
-        // printf("Q0: %f, Q1: %f, Q2: %f, Q3: %f\n", q0, q1, q2, q3);
-        printf("Angle x: %f, Angle y: %f\n", roll, pitch);
+        printf("MAG DATA: X=%d, Y=%d, Z=%d\n", mag_data.x, mag_data.y, mag_data.z);
         vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+void sg90_task(void *pvParameters) {
+    float desired_angle = 0; // Horizontal position
+    while (1) {
+    float current_angle = angle_x;
+    float error = desired_angle - current_angle;
+    // Calculate the integral term
+    integral += error;
+    // Calculate the derivative term
+    float derivative = error - previous_error;
+    // Calculate the PID output
+    float output = kp * error + ki * integral + kd * derivative;
+    // Update the previous error
+    previous_error = error;
+    int value = pidOutputToDutyCycle(output);
+    mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, value);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
 
@@ -244,7 +344,7 @@ void app_main()
 {
     i2c_master_init();
     ESP_LOGI(TAG, "I2C initialized");
-    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, SERVO_GPIO);
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, SERVO_ROLL_GPIO);
 
     mcpwm_config_t pwm_config;
     pwm_config.frequency = 50; //set frequency to 50Hz - standard for servos
@@ -256,10 +356,10 @@ void app_main()
 
     // Set the servo to the middle position
     mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, (SERVO_MAX_PULSEWIDTH + SERVO_MIN_PULSEWIDTH) / 2);
-    mpu6050_init();
+    mpu9150_init();
     ESP_LOGI(TAG, "MPU6050 initialized");
     // servo_init();
     // ESP_LOGI(TAG, "SG90 SERVO initialized");
-    xTaskCreate(mpu6050_task, "mpu6050_task", 2048, NULL, 5, NULL);
-    // xTaskCreate(sg90_task, "sg90_task", 2048, NULL, 5, NULL);
+    xTaskCreate(mpu9150_task, "mpu6050_task", 2048, NULL, 5, NULL);
+    xTaskCreate(sg90_task, "sg90_task", 2048, NULL, 5, NULL);
 }
